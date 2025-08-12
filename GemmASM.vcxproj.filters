@@ -37,6 +37,9 @@
     <MASM Include="asm.asm">
       <Filter>Source Files</Filter>
     </MASM>
+    <MASM Include="asm-512.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
   </ItemGroup>
   <ItemGroup>
     <None Include="run.py" />

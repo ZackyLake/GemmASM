@@ -153,6 +153,7 @@
     <ClInclude Include="rely.h" />
   </ItemGroup>
   <ItemGroup>
+    <MASM Include="asm-512.asm" />
     <MASM Include="asm.asm" />
   </ItemGroup>
   <ItemGroup>

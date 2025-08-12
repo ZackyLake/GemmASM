@@ -106,17 +106,22 @@ static void GemmW4A8(const uint8_t* __restrict ptrWeight, const uint32_t* __rest
 }
 
 
-template<bool VNNI>
+template<uint8_t VNNI>
 static __forceinline void dp4a_lohi_single(__m256i& accum,
-    const __m256i& wgt, const __m256i& maskLo,
-    const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast) noexcept
+    const __m256i& wgt, const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast) noexcept
 {
+    const auto maskLo = _mm256_set1_epi8(0xf);
     const auto loWgt = _mm256_and_si256(wgt, maskLo);
     const auto hiWgt = _mm256_and_si256(_mm256_srli_epi32(wgt, 4), maskLo);
-    if constexpr (VNNI)
+    if constexpr (VNNI == 1)
     {
         accum = _mm256_dpbusd_avx_epi32(accum, loWgt, loIn4Bcast);
         accum = _mm256_dpbusd_avx_epi32(accum, hiWgt, hiIn4Bcast);
+    }
+    else if constexpr (VNNI == 2)
+    {
+        accum = _mm256_dpbusd_epi32(accum, loWgt, loIn4Bcast);
+        accum = _mm256_dpbusd_epi32(accum, hiWgt, hiIn4Bcast);
     }
     else
     {
@@ -129,17 +134,16 @@ static __forceinline void dp4a_lohi_single(__m256i& accum,
     }
 }
 
-template<bool VNNI, uint32_t AccumOffset, uint32_t YWgtPerYK, uint32_t YK, uint32_t YG, uint32_t... Idxes>
+template<uint8_t VNNI, uint32_t AccumOffset, uint32_t YWgtPerYK, uint32_t YK, uint32_t YG, uint32_t... Idxes>
 static __forceinline void dp4a_lohi(__m256i (&accum)[YK],
-    const __m256i (&wgt)[YG], const __m256i& maskLo,
-    const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast,
+    const __m256i (&wgt)[YG],const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast,
     std::integer_sequence<uint32_t, Idxes...>) noexcept
 {
-    (..., dp4a_lohi_single<VNNI>(accum[AccumOffset + Idxes / YWgtPerYK], wgt[Idxes], maskLo, loIn4Bcast, hiIn4Bcast));
+    (..., dp4a_lohi_single<VNNI>(accum[AccumOffset + Idxes / YWgtPerYK], wgt[Idxes], loIn4Bcast, hiIn4Bcast));
 }
 
-template<bool VNNI, uint32_t AccumOffset, uint32_t YWgtPerYK, uint32_t YK>
-static __forceinline void gemmBlk_(const uint8_t* __restrict ptrWeight, const __m256i& maskLo,
+template<uint8_t VNNI, uint32_t AccumOffset, uint32_t YWgtPerYK, uint32_t YK>
+static __forceinline void gemmBlk_(const uint8_t* __restrict ptrWeight,
     const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast, __m256i (&accum)[YK]) noexcept
 {
     __m256i loadWgt[YWgtPerBlk];
@@ -147,32 +151,31 @@ static __forceinline void gemmBlk_(const uint8_t* __restrict ptrWeight, const __
         loadWgt[i] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptrWeight + i * (256 / 8)));
 
     dp4a_lohi<VNNI, AccumOffset, YWgtPerYK>(accum,
-        loadWgt, maskLo, loIn4Bcast, hiIn4Bcast, std::make_integer_sequence<uint32_t, YWgtPerBlk>{});
+        loadWgt, loIn4Bcast, hiIn4Bcast, std::make_integer_sequence<uint32_t, YWgtPerBlk>{});
 }
 
-template<bool VNNI, uint32_t YWgtPerYK, uint32_t YK, uint32_t... Idxes>
+template<uint8_t VNNI, uint32_t YWgtPerYK, uint32_t YK, uint32_t... Idxes>
 static __forceinline void gemmBlk(const uint8_t* __restrict ptrWeight, const size_t strideWgtBlk,
-    const __m256i& maskLo, const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast, __m256i (&accum)[YK],
+    const __m256i& loIn4Bcast, const __m256i& hiIn4Bcast, __m256i (&accum)[YK],
     std::integer_sequence<uint32_t, Idxes...>) noexcept
 {
-    (..., gemmBlk_<VNNI, Idxes * YAccPerBlk, YWgtPerYK>(ptrWeight + Idxes * strideWgtBlk, maskLo, loIn4Bcast, hiIn4Bcast, accum));
+    (..., gemmBlk_<VNNI, Idxes * YAccPerBlk, YWgtPerYK>(ptrWeight + Idxes * strideWgtBlk, loIn4Bcast, hiIn4Bcast, accum));
 }
 
-template<bool VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK>
+template<uint8_t VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK>
 static __forceinline void gemm_loopN_(const uint8_t* __restrict& ptrWeight, const uint32_t* __restrict& ptrInput,
     __m256i (&accum)[YK], const size_t strideWgtBlk, uint32_t) noexcept
 {
     constexpr auto YWgt = YWgtPerYK * YK;
     static_assert(YWgt % YWgtPerBlk == 0);
     constexpr auto WgtBlk = YWgt / YWgtPerBlk;
-    const auto maskLo = _mm256_set1_epi8(0xf);
 
     // 1x8 * 8xCK
     const auto loIn4Bcast = _mm256_set1_epi32(*ptrInput++);
     const auto hiIn4Bcast = _mm256_set1_epi32(*ptrInput++);
     if constexpr (PerBlock)
     {
-        gemmBlk<VNNI, YWgtPerYK>(ptrWeight, strideWgtBlk, maskLo, loIn4Bcast, hiIn4Bcast, accum,
+        gemmBlk<VNNI, YWgtPerYK>(ptrWeight, strideWgtBlk, loIn4Bcast, hiIn4Bcast, accum,
             std::make_integer_sequence<uint32_t, WgtBlk>{});
     }
     else
@@ -184,12 +187,12 @@ static __forceinline void gemm_loopN_(const uint8_t* __restrict& ptrWeight, cons
                 loadWgt[i * YWgtPerBlk + j] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>
                     (ptrWeight + i * strideWgtBlk + j * (256 / 8)));
         }
-        dp4a_lohi<VNNI, 0, YWgtPerYK>(accum, loadWgt, maskLo, loIn4Bcast, hiIn4Bcast, std::make_integer_sequence<uint32_t, YWgt>{});
+        dp4a_lohi<VNNI, 0, YWgtPerYK>(accum, loadWgt, loIn4Bcast, hiIn4Bcast, std::make_integer_sequence<uint32_t, YWgt>{});
     }
     ptrWeight += YWgtPerBlk * (256 / 8);
 }
 
-template<bool VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK, uint32_t... loopN>
+template<uint8_t VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK, uint32_t... loopN>
 static __forceinline void gemm_loopN(const uint8_t* __restrict& ptrWeight, const uint32_t* __restrict& ptrInput,
     __m256i (&accum)[YK], const size_t strideWgtBlk,
     std::integer_sequence<uint32_t, loopN...>) noexcept
@@ -197,7 +200,7 @@ static __forceinline void gemm_loopN(const uint8_t* __restrict& ptrWeight, const
     (..., gemm_loopN_<VNNI, PerBlock, YK, YWgtPerYK>(ptrWeight, ptrInput, accum, strideWgtBlk, loopN));
 }
 
-template<bool VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK, uint32_t LoopN>
+template<uint8_t VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK, uint32_t LoopN>
 static __forceinline void gemm_unrollN_(__m256 (&output)[YK],
     const uint8_t* __restrict& ptrWeight, const uint32_t* __restrict& ptrInput,
     const uint32_t* __restrict& ptrSumIn, const uint8_t* __restrict& ptrZpWgt,
@@ -232,7 +235,7 @@ static __forceinline void gemm_unrollN_(__m256 (&output)[YK],
     }
 }
 
-template<bool VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK, uint32_t LoopN, uint32_t... unrollN>
+template<uint8_t VNNI, bool PerBlock, uint32_t YK, uint32_t YWgtPerYK, uint32_t LoopN, uint32_t... unrollN>
 static __forceinline void gemm_unrollN(__m256 (&output)[YK],
     const uint8_t* __restrict& ptrWeight, const uint32_t* __restrict& ptrInput,
     const uint32_t* __restrict& ptrSumIn, const uint8_t* __restrict& ptrZpWgt,
@@ -244,7 +247,7 @@ static __forceinline void gemm_unrollN(__m256 (&output)[YK],
         ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, strideWgtBlk, unrollN));
 }
 
-template<bool VNNI, bool PerBlock, uint32_t CountK = 32, uint32_t BlockN = 32, uint32_t UnrollN = 4>
+template<uint8_t VNNI, bool PerBlock, uint32_t CountK = 32, uint32_t BlockN = 32, uint32_t UnrollN = 4>
 static void GemmW4A8Unroll(const uint8_t* __restrict ptrWeight, const uint32_t* __restrict ptrInput, float* __restrict ptrDst,
     const uint32_t* __restrict ptrSumIn, const uint8_t* __restrict ptrZpWgt,
     const float* __restrict ptrScaleIn, const float* __restrict ptrScaleWgt,
@@ -291,6 +294,14 @@ extern "C" void GemmW4A8OVAsm(const uint8_t* __restrict ptrWeight, const uint32_
     const float* __restrict ptrScaleIn, const float* __restrict ptrScaleWgt,
     uint32_t totalN) noexcept;
 
+extern "C" void GemmW4A8OVAsm512(const uint8_t* __restrict ptrWeight, const uint32_t* __restrict ptrInput, float* __restrict ptrDst,
+    const uint32_t* __restrict ptrSumIn, const uint8_t* __restrict ptrZpWgt,
+    const float* __restrict ptrScaleIn, const float* __restrict ptrScaleWgt,
+    uint32_t totalN) noexcept;
+
+std::pair<bool, bool> SupportVNNI() noexcept;
+
+
 void GemmEntry(const Context* ctx, uint8_t method) noexcept
 {
     constexpr uint32_t BlockK = BlockOverK;
@@ -301,6 +312,11 @@ void GemmEntry(const Context* ctx, uint8_t method) noexcept
     const auto wgtColStride = ctx->TotalN * BlockK / 2;
     const auto wgtRowStride = ctx->BlockN * BlockK / 2;
     const auto kPerLoop = (method >= 4 && method <= 7) ? 2 : 1;
+    if (const auto [avx512, avx2] = SupportVNNI(); avx512 && !avx2)
+    {
+        if (method == 0 || method == 2 || method == 4 || method == 6)
+            method += 128;
+    }
     for (uint32_t k = 0; k < totalK; k += kPerLoop)
     {
         const auto kOffset = k * BlockK;
@@ -321,28 +337,41 @@ void GemmEntry(const Context* ctx, uint8_t method) noexcept
             case 0:
                 GemmW4A8OVAsm(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, ctx->BlockN);
                 break;
+            case 0 + 128:
+                GemmW4A8OVAsm512(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, ctx->BlockN);
+                break;
             case 1:
                 GemmW4A8(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, ctx->BlockN);
                 break;
             case 2:
-                GemmW4A8Unroll<true, false>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                GemmW4A8Unroll<1, false>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                break;
+            case 2 + 128:
+                GemmW4A8Unroll<2, false>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
                 break;
             case 3:
-                GemmW4A8Unroll<false, false>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                GemmW4A8Unroll<0, false>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
                 break;
             case 4:
-                GemmW4A8Unroll<true, false, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                GemmW4A8Unroll<1, false, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                break;
+            case 4 + 128:
+                GemmW4A8Unroll<2, false, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
                 break;
             case 5:
-                GemmW4A8Unroll<false, false, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                GemmW4A8Unroll<0, false, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
                 break;
             case 6:
-                GemmW4A8Unroll<true, true, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                GemmW4A8Unroll<1, true, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                break;
+            case 6 + 128:
+                GemmW4A8Unroll<2, true, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
                 break;
             case 7:
-                GemmW4A8Unroll<false, true, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
+                GemmW4A8Unroll<0, true, 64>(ptrWgt, ptrIn, ptrDst, ptrSumIn, ptrZpWgt, ptrScaleIn, ptrScaleWgt, wgtColStride, ctx->BlockN);
                 break;
-            default: break;
+            default:
+                exit(-1);
             }
         }
     }

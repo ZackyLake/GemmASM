@@ -32,7 +32,7 @@ ContextPack::ContextPack(uint32_t n, uint32_t k, uint32_t blockN, bool fillRef,
     DataSumIn.reserve(1 * n / BlockOverN);
 
     if (fillIn)
-        fillIn(DataIn, DataWgtReorder);
+        fillIn(DataIn, DataWgt);
     for (uint32_t i = 0; i < n; i += BlockOverN)
     {
         uint32_t sum = 0;
@@ -126,6 +126,7 @@ struct TestInfos
     uint32_t N = 1536u;
     uint32_t K = 1536u;
     uint32_t Block = 512u;
+    uint32_t Time = 2000;
     uint8_t Method = 255;
     bool InCache = false;
     bool PerfOnly = false;
@@ -159,7 +160,7 @@ TEST(Gemm, Def)
                 const auto tend = std::chrono::high_resolution_clock::now();
                 const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tend - tbegin).count();
                 times.push_back(ns);
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= 1500)
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= TestInfo.Time)
                     break;
             }
         }
@@ -176,7 +177,7 @@ TEST(Gemm, Def)
                 const auto tend = std::chrono::high_resolution_clock::now();
                 const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tend - tbegin).count();
                 times.push_back(ns);
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= 1600)
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= TestInfo.Time)
                     break;
             }
         }
@@ -193,7 +194,11 @@ TEST(Gemm, Def)
             {
                 for (auto& val : in)
                 {
-                    val = static_cast<uint8_t>(gen() % 16);
+                    val = static_cast<uint8_t>(gen() % 64);
+                }
+                for (auto& val : wgt)
+                {
+                    val = static_cast<uint8_t>(gen() % 8);
                 }
             });
         GemmEntry(&ctx, TestInfo.Method);
@@ -213,7 +218,7 @@ TEST(Gemm, Def)
 
 struct Reg
 {
-    uint32_t EAX = 0, EBC = 0, ECX = 0, EDX = 0;
+    uint32_t EAX = 0, EBX = 0, ECX = 0, EDX = 0;
 };
 static Reg cpuid(int32_t eax) noexcept
 {
@@ -228,6 +233,21 @@ static Reg cpuidex(int32_t eax, int32_t ecx) noexcept
     return ret;
 }
 
+std::pair<bool, bool> SupportVNNI() noexcept
+{
+    static const auto ret = []()
+    {
+        bool avx2 = false, avx512 = false;
+        if ((cpuidex(1, 0).ECX & (1u << 28)) != 0 &&
+            (cpuidex(7, 0).EBX & (1u << 5)) != 0)
+        {
+            avx512 = (cpuidex(7, 0).ECX & (1u << 11)) != 0;
+            avx2 = (cpuidex(7, 1).EAX & (1u << 4)) != 0;
+        }
+        return std::pair{ avx512, avx2 };
+    }();
+    return ret;
+}
 
 int main(int argc, char** argv)
 {
@@ -280,6 +300,8 @@ int main(int argc, char** argv)
             cpuTypes.push_back(type);
         }
         printf("CPU[%u] Types:[%s]\n", sysInfo.dwNumberOfProcessors, cpuTypes.c_str());
+        const auto [avx512, avx2] = SupportVNNI();
+        printf("AVX512-VNNI[%c]\tAVX2-VNNI[%c]\n", avx512 ? 'Y' : 'N', avx2 ? 'Y' : 'N');
     }).join();
 
     testing::InitGoogleTest(&argc, argv);
@@ -322,6 +344,11 @@ int main(int argc, char** argv)
         {
             TestInfo.PerfOnly = true;
         }
+        else if (arg.starts_with("-time="))
+        {
+            arg.remove_prefix(6);
+            std::from_chars(arg.data(), arg.data() + arg.size(), TestInfo.Time, 10);
+        }
     }
 
     if (TestInfo.Method == 255)
@@ -339,6 +366,9 @@ int main(int argc, char** argv)
         );
         exit(-1);
     }
+
+    if (TestInfo.Block > TestInfo.N)
+        TestInfo.Block = TestInfo.N;
 
     printf("Test dims: [1]x[%u]x[%u] @ [%u]\n", TestInfo.N, TestInfo.K, TestInfo.Block);
 
