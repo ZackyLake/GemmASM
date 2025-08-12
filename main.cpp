@@ -53,8 +53,8 @@ ContextPack::ContextPack(uint32_t n, uint32_t k, uint32_t blockN, bool fillRef,
                 {
                     const auto col_ = col + i;
                     const auto ptrWgt = DataWgt.data() + rowOffset + col_;
-                    const uint8_t lo[4] = { ptrWgt[k * 0], ptrWgt[k * 2], ptrWgt[k * 4], ptrWgt[k * 6] };
-                    const uint8_t hi[4] = { ptrWgt[k * 1], ptrWgt[k * 3], ptrWgt[k * 5], ptrWgt[k * 7] };
+                    const uint8_t lo[4] = { ptrWgt[k * 0], ptrWgt[k * 1], ptrWgt[k * 2], ptrWgt[k * 3] };
+                    const uint8_t hi[4] = { ptrWgt[k * 4], ptrWgt[k * 5], ptrWgt[k * 6], ptrWgt[k * 7] };
                     for (uint32_t j = 0; j < 4; ++j)
                     {
                         *ptrWgtR++ = (lo[j] & 0xfu) + ((hi[j] & 0xfu) << 4);
@@ -126,7 +126,7 @@ struct TestInfos
     uint32_t N = 1536u;
     uint32_t K = 1536u;
     uint32_t Block = 512u;
-    uint8_t Method = 0;
+    uint8_t Method = 255;
     bool InCache = false;
     bool PerfOnly = false;
 };
@@ -159,7 +159,7 @@ TEST(Gemm, Def)
                 const auto tend = std::chrono::high_resolution_clock::now();
                 const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tend - tbegin).count();
                 times.push_back(ns);
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= 2000)
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= 1500)
                     break;
             }
         }
@@ -176,7 +176,7 @@ TEST(Gemm, Def)
                 const auto tend = std::chrono::high_resolution_clock::now();
                 const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tend - tbegin).count();
                 times.push_back(ns);
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= 2000)
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(tend - t0).count() >= 1600)
                     break;
             }
         }
@@ -323,6 +323,23 @@ int main(int argc, char** argv)
             TestInfo.PerfOnly = true;
         }
     }
+
+    if (TestInfo.Method == 255)
+    {
+        printf(
+            "alg:\n"
+            "  [0]: OV\n"
+            "  [1]: W4A8\n"
+            "  [2]: Unroll32-VNNI\n"
+            "  [3]: Unroll32-AVX2\n"
+            "  [4]: Unroll64-VNNI\n"
+            "  [5]: Unroll64-AVX2\n"
+            "  [6]: Unroll64-VNNI-Block8\n"
+            "  [7]: Unroll64-AVX2-Block8\n"
+        );
+        exit(-1);
+    }
+
     printf("Test dims: [1]x[%u]x[%u] @ [%u]\n", TestInfo.N, TestInfo.K, TestInfo.Block);
 
     // thread pinning
